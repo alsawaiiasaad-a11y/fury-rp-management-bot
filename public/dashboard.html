@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Fury Dashboard</title>
+  <style>
+    body { background:#0f172a; color:white; font-family:Arial; }
+    h1 { text-align:center; }
+    .card {
+      background:#1e293b;
+      margin:10px auto;
+      padding:15px;
+      width:60%;
+      border-radius:10px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+    }
+    img {
+      width:40px;
+      border-radius:50%;
+      margin-right:10px;
+    }
+    .user {
+      display:flex;
+      align-items:center;
+    }
+    .active { color:#00ff88; }
+    .inactive { color:#888; }
+  </style>
+</head>
+<body>
+
+<h1>🔥 Fury Dashboard</h1>
+
+<div id="board"></div>
+
+<script>
+async function load() {
+  const res = await fetch('/api/leaderboard');
+  const data = await res.json();
+
+  const board = document.getElementById('board');
+  board.innerHTML = '';
+
+  data.forEach((u, i) => {
+    board.innerHTML += `
+      <div class="card">
+        <div class="user">
+          ${u.avatar ? `<img src="${u.avatar}">` : ''}
+          <b>#${i+1} ${u.username}</b>
+        </div>
+        <div>
+          ${u.total} pts<br>
+          <span class="${u.active ? 'active' : 'inactive'}">
+            ${u.active ? '🟢 Active' : '⚫ Offline'}
+          </span>
+        </div>
+      </div>
+    `;
+  });
+}
+
+load();
+setInterval(load, 5000);
+</script>
+
+</body>
+</html>
