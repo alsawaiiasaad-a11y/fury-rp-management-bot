@@ -18,7 +18,7 @@ const path = require('path');
 // ===== MongoDB =====
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('✅ MongoDB connected'))
-  .catch(err => console.error('❌ MongoDB connection error:', err));
+  .catch(err => console.error('❌ MongoDB error:', err));
 
 // ===== Schema =====
 const userSchema = new mongoose.Schema({
@@ -27,10 +27,9 @@ const userSchema = new mongoose.Schema({
   active: { type: Boolean, default: false },
   lastClick: { type: Number, default: 0 }
 });
-
 const User = mongoose.model('User', userSchema);
 
-// ===== Discord Client =====
+// ===== Bot Setup =====
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -51,6 +50,15 @@ const row = new ActionRowBuilder().addComponents(
 );
 
 // ===== Helper =====
+async function getUser(userId) {
+  let user = await User.findOne({ userId });
+  if (!user) {
+    user = new User({ userId });
+    await user.save();
+  }
+  return user;
+}
+
 function isAdmin(member) {
   return member.permissions.has('Administrator');
 }
@@ -79,17 +87,14 @@ async function sendPanel(channel) {
   });
 }
 
-// ===== MESSAGE HANDLER =====
+// ===== Commands =====
 client.on('messageCreate', async msg => {
   if (!msg.guild || msg.author.bot) return;
 
-  // PANEL
   if (msg.content === '!panel') return sendPanel(msg.channel);
 
-  // LEADERBOARD
   if (msg.content === '!leaderboard') {
     const users = await User.find().sort({ total: -1 });
-
     let desc = users.length ? '' : 'No data yet';
 
     users.forEach((u, i) => {
@@ -106,15 +111,12 @@ client.on('messageCreate', async msg => {
     });
   }
 
-  // RESET
   if (msg.content === '!resetpoints') {
     if (!isAdmin(msg.member)) return;
-
-    await User.updateMany({}, { $set: { total: 0 } });
+    await User.updateMany({}, { total: 0 });
     return msg.reply("✅ All points reset!");
   }
 
-  // ADD POINTS (FIXED)
   if (msg.content.startsWith('!addpoints')) {
     if (!isAdmin(msg.member)) return;
 
@@ -134,7 +136,6 @@ client.on('messageCreate', async msg => {
     return msg.reply(`✅ Added ${points} points to <@${mention.id}>`);
   }
 
-  // REMOVE POINTS (FIXED)
   if (msg.content.startsWith('!removepoints')) {
     if (!isAdmin(msg.member)) return;
 
@@ -153,7 +154,6 @@ client.on('messageCreate', async msg => {
     return msg.reply(`➖ Removed ${points} points from <@${mention.id}>`);
   }
 
-  // SET POINTS (FIXED)
   if (msg.content.startsWith('!setpoints')) {
     if (!isAdmin(msg.member)) return;
 
@@ -173,7 +173,6 @@ client.on('messageCreate', async msg => {
     return msg.reply(`🎯 Set <@${mention.id}> points to ${points}`);
   }
 
-  // TOP 10
   if (msg.content === '!top10') {
     const users = await User.find().sort({ total: -1 }).limit(10);
 
@@ -194,40 +193,40 @@ client.on('messageCreate', async msg => {
   }
 });
 
-// ===== BUTTONS =====
+// ===== Buttons =====
 client.on(Events.InteractionCreate, async interaction => {
   if (!interaction.isButton()) return;
 
   const userId = interaction.user.id;
+  let user = await getUser(userId);
 
   const member = interaction.guild.members.cache.get(userId);
   const inAssist = member?.voice.channelId && ASSIST_CHANNELS.includes(member.voice.channelId);
 
-  if (!inAssist) {
-    return interaction.reply({ content: '❌ Join assist VC', ephemeral: true });
-  }
+  if (!inAssist) return interaction.reply({ content: '❌ Join assist VC', ephemeral: true });
 
   if (interaction.customId === 'in') {
-    await User.updateOne(
-      { userId },
-      { $set: { active: true, lastClick: Date.now() } },
-      { upsert: true }
-    );
+    if (user.active) return interaction.reply({ content: '⚠️ Already IN', ephemeral: true });
+
+    user.active = true;
+    user.lastClick = Date.now();
+    await user.save();
 
     return interaction.reply({ content: '✅ Signed IN', ephemeral: true });
   }
 
   if (interaction.customId === 'out') {
-    await User.updateOne(
-      { userId },
-      { $set: { active: false, lastClick: 0 } }
-    );
+    if (!user.active) return interaction.reply({ content: '⚠️ Not IN', ephemeral: true });
+
+    user.active = false;
+    user.lastClick = 0;
+    await user.save();
 
     return interaction.reply({ content: '⛔ Signed OUT', ephemeral: true });
   }
 });
 
-// ===== TIMER =====
+// ===== Timer =====
 setInterval(async () => {
   const now = Date.now();
   const users = await User.find({ active: true });
@@ -245,26 +244,41 @@ setInterval(async () => {
     const inAssist = ASSIST_CHANNELS.includes(member.voice.channelId);
 
     if (!inAssist || member.voice.selfDeaf || now - user.lastClick > 30 * 60 * 1000) {
-      await User.updateOne(
-        { userId: user.userId },
-        { $set: { active: false, lastClick: 0 } }
-      );
+      user.active = false;
+      user.lastClick = 0;
+      await user.save();
+
+      try {
+        await member.send('🚨 Timer stopped. Click IN again.');
+      } catch {}
       continue;
     }
 
-    await User.updateOne(
-      { userId: user.userId },
-      { $inc: { total: 1 } }
-    );
+    user.total += 1;
+    await user.save();
   }
-
-  console.log("✅ Timer loop ran");
 }, 5 * 60 * 1000);
 
+// ===== Deaf Detect =====
+client.on('voiceStateUpdate', async (oldState, newState) => {
+  const member = newState.member || oldState.member;
+  const user = await getUser(member.id);
+
+  if (user.active && newState.selfDeaf && !oldState.selfDeaf) {
+    user.active = false;
+    user.lastClick = 0;
+    await user.save();
+
+    try {
+      await member.send('🚫 You deafened. Timer stopped.');
+    } catch {}
+  }
+});
+
 // ===== READY =====
-client.once('clientReady', () => {
+client.once('ready', () => {
   console.log(`${client.user.tag} is online!`);
 });
 
 // ===== LOGIN =====
-client.login(TOKEN);
+client.login(process.env.TOKEN);
