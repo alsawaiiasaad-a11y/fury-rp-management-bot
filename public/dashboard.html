@@ -1,31 +1,68 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Fury Dashboard</title>
   <style>
-    body { background:#0f172a; color:white; font-family:Arial; }
-    h1 { text-align:center; }
-    .card {
-      background:#1e293b;
-      margin:10px auto;
-      padding:15px;
-      width:60%;
-      border-radius:10px;
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
+    body {
+      background: #0f172a;
+      color: white;
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 0;
     }
-    img {
-      width:40px;
-      border-radius:50%;
-      margin-right:10px;
+    h1 {
+      text-align: center;
+      padding: 20px 0;
+      font-size: 2rem;
+    }
+    #board {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      padding-bottom: 50px;
+    }
+    .card {
+      background: #1e293b;
+      margin: 10px;
+      padding: 15px 20px;
+      width: 300px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .card:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 4px 10px rgba(0, 255, 136, 0.3);
     }
     .user {
-      display:flex;
-      align-items:center;
+      display: flex;
+      align-items: center;
     }
-    .active { color:#00ff88; }
-    .inactive { color:#888; }
+    img {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      margin-right: 10px;
+      object-fit: cover;
+      border: 2px solid #00ff88;
+    }
+    .active {
+      color: #00ff88;
+      font-weight: bold;
+    }
+    .inactive {
+      color: #888;
+      font-weight: bold;
+    }
+    .points {
+      font-size: 1.1rem;
+      margin-bottom: 5px;
+      text-align: right;
+    }
   </style>
 </head>
 <body>
@@ -35,33 +72,40 @@
 <div id="board"></div>
 
 <script>
-async function load() {
-  const res = await fetch('/api/leaderboard');
-  const data = await res.json();
+async function loadLeaderboard() {
+  try {
+    const res = await fetch('/api/leaderboard');
+    const data = await res.json();
+    const board = document.getElementById('board');
+    board.innerHTML = '';
 
-  const board = document.getElementById('board');
-  board.innerHTML = '';
+    data.forEach((u, i) => {
+      const avatarHTML = u.avatar ? `<img src="${u.avatar}" alt="${u.username}">` : '';
+      const statusClass = u.active ? 'active' : 'inactive';
+      const statusText = u.active ? '🟢 Active' : '⚫ Offline';
 
-  data.forEach((u, i) => {
-    board.innerHTML += `
-      <div class="card">
-        <div class="user">
-          ${u.avatar ? `<img src="${u.avatar}">` : ''}
-          <b>#${i+1} ${u.username}</b>
+      board.innerHTML += `
+        <div class="card">
+          <div class="user">
+            ${avatarHTML}
+            <b>#${i + 1} ${u.username}</b>
+          </div>
+          <div>
+            <div class="points">${u.total} pts</div>
+            <div class="${statusClass}">${statusText}</div>
+          </div>
         </div>
-        <div>
-          ${u.total} pts<br>
-          <span class="${u.active ? 'active' : 'inactive'}">
-            ${u.active ? '🟢 Active' : '⚫ Offline'}
-          </span>
-        </div>
-      </div>
-    `;
-  });
+      `;
+    });
+  } catch (err) {
+    console.error('Failed to load leaderboard:', err);
+  }
 }
 
-load();
-setInterval(load, 5000);
+// Initial load
+loadLeaderboard();
+// Refresh every 5 seconds
+setInterval(loadLeaderboard, 5000);
 </script>
 
 </body>
