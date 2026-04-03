@@ -48,10 +48,20 @@ function isAdmin(member) {
   return member.permissions.has('Administrator');
 }
 
+// ✅ ADMIN COMMANDS LIST (ADDED)
+const adminCommands = [
+  '!leaderboard',
+  '!panel',
+  '!resetpoints',
+  '!addpoints',
+  '!removepoints',
+  '!setpoints'
+];
+
 // ===== Buttons =====
 const row = new ActionRowBuilder().addComponents(
-  new ButtonBuilder().setCustomId('in').setLabel('🟢 IN').setStyle(ButtonStyle.Success),
-  new ButtonBuilder().setCustomId('out').setLabel('🔴 OUT').setStyle(ButtonStyle.Danger)
+  new ButtonBuilder().setCustomId('in').setLabel('🟢 In').setStyle(ButtonStyle.Success),
+  new ButtonBuilder().setCustomId('out').setLabel('🔴 Out').setStyle(ButtonStyle.Danger)
 );
 
 // ===== Helper =====
@@ -76,11 +86,11 @@ async function sendPanel(channel) {
 
   const embed = new EmbedBuilder()
     .setColor(0x00AEEF)
-    .setTitle('🔥 Fury Management System')
+    .setTitle('💻 Fury Management System')
     .setDescription(
-      "Click **IN** to start working\n" +
+      "Click **In** to start working\n" +
       "⏱️ Click every 30 minutes to stay active\n" +
-      "🚫 Deaf/Mute = auto stop"
+      "🚫 Deafened = auto stop"
     )
     .setImage('attachment://design.gif')
     .setFooter({ text: 'Fury RP System' });
@@ -92,10 +102,20 @@ async function sendPanel(channel) {
 client.on('messageCreate', async msg => {
   if (!msg.guild || msg.author.bot) return;
 
+  // ✅ Ignore normal chat
+  if (!msg.content.startsWith('!')) return;
+
   const isUserAdmin = isAdmin(msg.member);
+  const args = msg.content.split(' ');
+  const cmd = args[0].toLowerCase();
+
+  // ✅ Only block admin commands
+  if (adminCommands.includes(cmd) && !isUserAdmin) {
+    return msg.reply('❌ Admin only command');
+  }
 
   // ===== TOP 10 (PUBLIC) =====
-  if (msg.content === '!top10') {
+  if (cmd === '!top10') {
     const users = await User.find({ total: { $gt: 0 } })
       .sort({ total: -1 })
       .limit(10);
@@ -117,7 +137,7 @@ client.on('messageCreate', async msg => {
   }
 
   // ===== RANK (PUBLIC) =====
-  if (msg.content === '!rank') {
+  if (cmd === '!rank') {
     const user = await getUser(msg.author.id);
     const users = await User.find({ total: { $gt: 0 } }).sort({ total: -1 });
 
@@ -138,11 +158,8 @@ client.on('messageCreate', async msg => {
     });
   }
 
-  // ===== ADMIN ONLY =====
-  if (!isUserAdmin) return msg.reply('❌ Admin only command');
-
-  // ===== LEADERBOARD (ADMIN WITH PAGINATION) =====
-  if (msg.content === '!leaderboard') {
+  // ===== LEADERBOARD (ADMIN) =====
+  if (cmd === '!leaderboard') {
     const users = await User.find({ total: { $gt: 0 } }).sort({ total: -1 });
     if (!users.length) return msg.channel.send('No one has points yet 👀');
 
@@ -172,7 +189,7 @@ client.on('messageCreate', async msg => {
 
     const collector = sentMsg.createMessageComponentCollector({
       componentType: 'BUTTON',
-      time: 120_000
+      time: 120000
     });
 
     collector.on('collect', async interaction => {
@@ -198,17 +215,16 @@ client.on('messageCreate', async msg => {
   }
 
   // ===== OTHER ADMIN COMMANDS =====
-  if (msg.content === '!panel') return sendPanel(msg.channel);
+  if (cmd === '!panel') return sendPanel(msg.channel);
 
-  if (msg.content === '!resetpoints') {
+  if (cmd === '!resetpoints') {
     await User.updateMany({}, { total: 0 });
     return msg.reply("✅ All points reset");
   }
 
-  const cmd = msg.content.split(' ')[0];
   if (['!addpoints', '!removepoints', '!setpoints'].includes(cmd)) {
     const mention = msg.mentions.users.first();
-    const points = parseInt(msg.content.split(' ')[2]);
+    const points = parseInt(args[2]);
     if (!mention || isNaN(points)) return msg.reply(`Usage: ${cmd} @user 50`);
 
     if (cmd === '!addpoints') await User.updateOne({ userId: mention.id }, { $inc: { total: points } }, { upsert: true });
@@ -231,7 +247,7 @@ client.on(Events.InteractionCreate, async interaction => {
   const isMuted = member?.voice.selfMute;
 
   if (!inAssist) return interaction.reply({ content: '❌ Join assist VC first', ephemeral: true });
-  if (isDeafened || isMuted) return interaction.reply({ content: '🚫 Cannot sign IN while deafened or muted', ephemeral: true });
+  if (isDeafened || isMuted) return interaction.reply({ content: '🚫 Cannot sign IN while deafened', ephemeral: true });
 
   if (interaction.customId === 'in') {
     if (user.active) return interaction.reply({ content: '⚠️ You are already IN', ephemeral: true });
@@ -285,7 +301,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   const member = newState.member || oldState.member;
   const user = await getUser(member.id);
 
-  // 🚫 Deaf = stop
   if (user.active && newState.selfDeaf && !oldState.selfDeaf) {
     user.active = false;
     user.lastClick = 0;
@@ -293,7 +308,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     try { await member.send('🚫 You deafened. Timer stopped.'); } catch {}
   }
 
-  // 🔴 LEFT VC = stop (THIS IS WHAT YOU ADD)
   if (user.active && oldState.channelId && !newState.channelId) {
     user.active = false;
     user.lastClick = 0;
@@ -301,7 +315,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     try { await member.send('🚨 You left the assist VC. Timer stopped.'); } catch {}
   }
 
-  // 🔁 SWITCHED VC (optional but recommended)
   if (user.active && oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
     user.active = false;
     user.lastClick = 0;
