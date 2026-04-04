@@ -48,7 +48,7 @@ function isAdmin(member) {
   return member.permissions.has('Administrator');
 }
 
-// ✅ ADMIN COMMANDS LIST (ADDED)
+// ✅ ADMIN COMMANDS LIST
 const adminCommands = [
   '!leaderboard',
   '!panel',
@@ -101,15 +101,12 @@ async function sendPanel(channel) {
 // ===== COMMANDS =====
 client.on('messageCreate', async msg => {
   if (!msg.guild || msg.author.bot) return;
-
-  // ✅ Ignore normal chat
   if (!msg.content.startsWith('!')) return;
 
   const isUserAdmin = isAdmin(msg.member);
   const args = msg.content.split(' ');
   const cmd = args[0].toLowerCase();
 
-  // ✅ Only block admin commands
   if (adminCommands.includes(cmd) && !isUserAdmin) {
     return msg.reply('❌ Admin only command');
   }
@@ -121,7 +118,6 @@ client.on('messageCreate', async msg => {
       .limit(10);
 
     let desc = users.length ? '' : 'No data yet';
-
     users.forEach((u, i) => {
       desc += `**#${i + 1}** <@${u.userId}> • ${u.total} pts\n`;
     });
@@ -140,7 +136,6 @@ client.on('messageCreate', async msg => {
   if (cmd === '!rank') {
     const user = await getUser(msg.author.id);
     const users = await User.find({ total: { $gt: 0 } }).sort({ total: -1 });
-
     const rank = users.findIndex(u => u.userId === msg.author.id) + 1;
 
     return msg.reply({
@@ -180,12 +175,20 @@ client.on('messageCreate', async msg => {
         .setDescription(desc);
     };
 
-    const navRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('prev').setLabel('⬅️ Previous').setStyle(ButtonStyle.Secondary).setDisabled(true),
-      new ButtonBuilder().setCustomId('next').setLabel('➡️ Next').setStyle(ButtonStyle.Secondary).setDisabled(totalPages === 1)
+    const createNavRow = (page) => new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('prev')
+        .setLabel('⬅️ Previous')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(page === 0),
+      new ButtonBuilder()
+        .setCustomId('next')
+        .setLabel('➡️ Next')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(page + 1 === totalPages)
     );
 
-    const sentMsg = await msg.channel.send({ embeds: [generateEmbed(page)], components: [navRow] });
+    const sentMsg = await msg.channel.send({ embeds: [generateEmbed(page)], components: [createNavRow(page)] });
 
     const collector = sentMsg.createMessageComponentCollector({
       componentType: 'BUTTON',
@@ -200,15 +203,11 @@ client.on('messageCreate', async msg => {
       if (interaction.customId === 'next') page++;
       if (interaction.customId === 'prev') page--;
 
-      navRow.components[0].setDisabled(page === 0);
-      navRow.components[1].setDisabled(page + 1 === totalPages);
-
-      await interaction.update({ embeds: [generateEmbed(page)], components: [navRow] });
+      await interaction.update({ embeds: [generateEmbed(page)], components: [createNavRow(page)] });
     });
 
     collector.on('end', async () => {
-      navRow.components.forEach(btn => btn.setDisabled(true));
-      await sentMsg.edit({ components: [navRow] });
+      await sentMsg.edit({ components: [createNavRow(page).setComponents(...createNavRow(page).components.map(b => b.setDisabled(true)))] });
     });
 
     return;
