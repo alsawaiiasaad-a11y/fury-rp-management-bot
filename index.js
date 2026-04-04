@@ -203,11 +203,14 @@ client.on('messageCreate', async msg => {
       if (interaction.customId === 'next') page++;
       if (interaction.customId === 'prev') page--;
 
+      // ✅ Create fresh row every update
       await interaction.update({ embeds: [generateEmbed(page)], components: [createNavRow(page)] });
     });
 
     collector.on('end', async () => {
-      await sentMsg.edit({ components: [createNavRow(page).setComponents(...createNavRow(page).components.map(b => b.setDisabled(true)))] });
+      const endRow = createNavRow(page);
+      endRow.components.forEach(btn => btn.setDisabled(true));
+      await sentMsg.edit({ components: [endRow] });
     });
 
     return;
