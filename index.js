@@ -153,67 +153,24 @@ client.on('messageCreate', async msg => {
     });
   }
 
-  // ===== LEADERBOARD (ADMIN) =====
+  // ===== LEADERBOARD (ADMIN, LIST VERSION) =====
   if (cmd === '!leaderboard') {
     const users = await User.find({ total: { $gt: 0 } }).sort({ total: -1 });
     if (!users.length) return msg.channel.send('No one has points yet 👀');
 
-    let page = 0;
-    const pageSize = 10;
-    const totalPages = Math.ceil(users.length / pageSize);
-
-    const generateEmbed = (page) => {
-      const start = page * pageSize;
-      const list = users.slice(start, start + pageSize);
-      let desc = '';
-      list.forEach((u, i) => {
-        desc += `**#${start + i + 1}** <@${u.userId}> • **${u.total} pts**\n`;
-      });
-      return new EmbedBuilder()
-        .setColor(0xFFD700)
-        .setTitle(`🏆 Leaderboard (Page ${page + 1}/${totalPages})`)
-        .setDescription(desc);
-    };
-
-    const createNavRow = (page) => new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId('prev')
-        .setLabel('⬅️ Previous')
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(page === 0),
-      new ButtonBuilder()
-        .setCustomId('next')
-        .setLabel('➡️ Next')
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(page + 1 === totalPages)
-    );
-
-    const sentMsg = await msg.channel.send({ embeds: [generateEmbed(page)], components: [createNavRow(page)] });
-
-    const collector = sentMsg.createMessageComponentCollector({
-      componentType: 'BUTTON',
-      time: 120000
+    let desc = '';
+    users.forEach((u, i) => {
+      desc += `**#${i + 1}** <@${u.userId}> • ${u.total} pts\n`;
     });
 
-    collector.on('collect', async interaction => {
-      if (interaction.user.id !== msg.author.id) {
-        return interaction.reply({ content: 'Only the command sender can control this', ephemeral: true });
-      }
-
-      if (interaction.customId === 'next') page++;
-      if (interaction.customId === 'prev') page--;
-
-      // ✅ Create fresh row every update
-      await interaction.update({ embeds: [generateEmbed(page)], components: [createNavRow(page)] });
+    return msg.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xFFD700)
+          .setTitle(`🏆 Leaderboard`)
+          .setDescription(desc)
+      ]
     });
-
-    collector.on('end', async () => {
-      const endRow = createNavRow(page);
-      endRow.components.forEach(btn => btn.setDisabled(true));
-      await sentMsg.edit({ components: [endRow] });
-    });
-
-    return;
   }
 
   // ===== OTHER ADMIN COMMANDS =====
