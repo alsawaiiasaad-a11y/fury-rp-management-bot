@@ -48,16 +48,6 @@ function isAdmin(member) {
   return member.permissions.has('Administrator');
 }
 
-// ✅ ADMIN COMMANDS LIST
-const adminCommands = [
-  '!leaderboard',
-  '!panel',
-  '!resetpoints',
-  '!addpoints',
-  '!removepoints',
-  '!setpoints'
-];
-
 // ===== Buttons =====
 const row = new ActionRowBuilder().addComponents(
   new ButtonBuilder().setCustomId('in').setLabel('🟢 In').setStyle(ButtonStyle.Success),
@@ -103,15 +93,25 @@ client.on('messageCreate', async msg => {
   if (!msg.guild || msg.author.bot) return;
   if (!msg.content.startsWith('!')) return;
 
-  const isUserAdmin = isAdmin(msg.member);
-  const args = msg.content.split(' ');
+  const args = msg.content.trim().split(/\s+/);
   const cmd = args[0].toLowerCase();
+  const isUserAdmin = isAdmin(msg.member);
 
-  if (adminCommands.includes(cmd) && !isUserAdmin) {
+  // ✅ ONLY THESE NEED ADMIN
+  const adminOnly = [
+    '!leaderboard',
+    '!panel',
+    '!resetpoints',
+    '!addpoints',
+    '!removepoints',
+    '!setpoints'
+  ];
+
+  if (adminOnly.includes(cmd) && !isUserAdmin) {
     return msg.reply('❌ Admin only command');
   }
 
-  // ===== TOP 10 (PUBLIC) =====
+  // ===== TOP 10 =====
   if (cmd === '!top10') {
     const users = await User.find({ total: { $gt: 0 } })
       .sort({ total: -1 })
@@ -132,7 +132,7 @@ client.on('messageCreate', async msg => {
     });
   }
 
-  // ===== RANK (PUBLIC) =====
+  // ===== RANK =====
   if (cmd === '!rank') {
     const user = await getUser(msg.author.id);
     const users = await User.find({ total: { $gt: 0 } }).sort({ total: -1 });
@@ -153,7 +153,7 @@ client.on('messageCreate', async msg => {
     });
   }
 
-  // ===== LEADERBOARD (ADMIN, LIST VERSION) =====
+  // ===== LEADERBOARD =====
   if (cmd === '!leaderboard') {
     const users = await User.find({ total: { $gt: 0 } }).sort({ total: -1 });
     if (!users.length) return msg.channel.send('No one has points yet 👀');
@@ -173,22 +173,35 @@ client.on('messageCreate', async msg => {
     });
   }
 
-  // ===== OTHER ADMIN COMMANDS =====
+  // ===== PANEL =====
   if (cmd === '!panel') return sendPanel(msg.channel);
 
+  // ===== RESET =====
   if (cmd === '!resetpoints') {
     await User.updateMany({}, { total: 0 });
     return msg.reply("✅ All points reset");
   }
 
+  // ===== POINT COMMANDS =====
   if (['!addpoints', '!removepoints', '!setpoints'].includes(cmd)) {
     const mention = msg.mentions.users.first();
     const points = parseInt(args[2]);
-    if (!mention || isNaN(points)) return msg.reply(`Usage: ${cmd} @user 50`);
 
-    if (cmd === '!addpoints') await User.updateOne({ userId: mention.id }, { $inc: { total: points } }, { upsert: true });
-    if (cmd === '!removepoints') await User.updateOne({ userId: mention.id }, { $inc: { total: -points } });
-    if (cmd === '!setpoints') await User.updateOne({ userId: mention.id }, { $set: { total: points } }, { upsert: true });
+    if (!mention || isNaN(points)) {
+      return msg.reply(`Usage: ${cmd} @user 50`);
+    }
+
+    if (cmd === '!addpoints') {
+      await User.updateOne({ userId: mention.id }, { $inc: { total: points } }, { upsert: true });
+    }
+
+    if (cmd === '!removepoints') {
+      await User.updateOne({ userId: mention.id }, { $inc: { total: -points } });
+    }
+
+    if (cmd === '!setpoints') {
+      await User.updateOne({ userId: mention.id }, { $set: { total: points } }, { upsert: true });
+    }
 
     return msg.reply(`✅ Updated points for <@${mention.id}>`);
   }
