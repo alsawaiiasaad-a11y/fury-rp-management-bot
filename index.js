@@ -1,267 +1,198 @@
 require('dotenv').config();
 
-const mongoose = require('mongoose');
-const {
-  Client,
-  GatewayIntentBits,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  Events,
-  EmbedBuilder,
-  AttachmentBuilder,
-  REST,
-  Routes,
-  SlashCommandBuilder
-} = require('discord.js');
-
+const { Client, GatewayIntentBits, Collection, PermissionsBitField, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
 
-// ===== MongoDB =====
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log('✅ MongoDB connected'))
-  .catch(err => console.error('❌ MongoDB error:', err));
-
-// ===== Schema =====
-const userSchema = new mongoose.Schema({
-  userId: String,
-  total: { type: Number, default: 0 },
-  active: { type: Boolean, default: false },
-  lastClick: { type: Number, default: 0 }
-});
-const User = mongoose.model('User', userSchema);
-
-// ===== Bot =====
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.MessageContent
+    ]
 });
 
-const TOKEN = process.env.TOKEN;
-const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
-const ASSIST_CHANNELS = (process.env.ASSIST_CHANNELS || '').split(',').filter(Boolean);
-
-// ===== Cooldown =====
-const cooldowns = new Map();
-const COOLDOWN = 5000;
-
-function checkCooldown(userId, cmd) {
-  const key = `${userId}-${cmd}`;
-  const now = Date.now();
-
-  if (cooldowns.has(key)) {
-    const expire = cooldowns.get(key);
-    if (now < expire) return Math.ceil((expire - now) / 1000);
-  }
-
-  cooldowns.set(key, now + COOLDOWN);
-  return null;
+// ----------------- DATA STORAGE -----------------
+const pointsDataPath = path.join(__dirname, 'points.json');
+let points = {};
+if (fs.existsSync(pointsDataPath)) {
+    points = JSON.parse(fs.readFileSync(pointsDataPath, 'utf8'));
 }
 
-// ===== Helper =====
-async function getUser(userId) {
-  let user = await User.findOne({ userId });
-  if (!user) {
-    user = new User({ userId });
-    await user.save();
-  }
-  return user;
+const cooldowns = new Collection();
+
+// ----------------- HELPER FUNCTIONS -----------------
+function savePoints() {
+    fs.writeFileSync(pointsDataPath, JSON.stringify(points, null, 2));
 }
 
-// ===== Logs =====
-async function logAction(guild, text) {
-  try {
-    const ch = guild.channels.cache.get(LOG_CHANNEL_ID);
-    if (ch) ch.send(text);
-  } catch {}
+function addPoints(userId, amount) {
+    if (!points[userId]) points[userId] = 0;
+    points[userId] += amount;
+    savePoints();
 }
 
-// ===== PANEL =====
-async function sendPanel(channel) {
-  const filePath = path.join(__dirname, 'assets', 'design.gif');
-  if (!fs.existsSync(filePath)) return channel.send('❌ GIF missing');
-
-  const attachment = new AttachmentBuilder(filePath);
-
-  const embed = new EmbedBuilder()
-    .setColor(0x00AEEF)
-    .setTitle('💻 Fury Management System')
-    .setDescription(
-      "Click **In** to start working\n" +
-      "⏱️ Click every 30 minutes\n" +
-      "🚫 Deafened = stop"
-    )
-    .setImage('attachment://design.gif');
-
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('in').setLabel('🟢 In').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('out').setLabel('🔴 Out').setStyle(ButtonStyle.Danger)
-  );
-
-  await channel.send({ embeds: [embed], files: [attachment], components: [row] });
+function removePoints(userId, amount) {
+    if (!points[userId]) points[userId] = 0;
+    points[userId] -= amount;
+    if (points[userId] < 0) points[userId] = 0;
+    savePoints();
 }
 
-// ===== SLASH COMMANDS =====
-const commands = [
-  new SlashCommandBuilder().setName('rank').setDescription('Your rank'),
-  new SlashCommandBuilder().setName('top10').setDescription('Top 10'),
-  new SlashCommandBuilder().setName('leaderboard').setDescription('Leaderboard'),
-  new SlashCommandBuilder().setName('panel').setDescription('Send panel'),
-  new SlashCommandBuilder()
-    .setName('addpoints')
-    .setDescription('Add points')
-    .addUserOption(o => o.setName('user').setRequired(true))
-    .addIntegerOption(o => o.setName('amount').setRequired(true)),
-  new SlashCommandBuilder()
-    .setName('removepoints')
-    .setDescription('Remove points')
-    .addUserOption(o => o.setName('user').setRequired(true))
-    .addIntegerOption(o => o.setName('amount').setRequired(true)),
-  new SlashCommandBuilder()
-    .setName('setpoints')
-    .setDescription('Set points')
-    .addUserOption(o => o.setName('user').setRequired(true))
-    .addIntegerOption(o => o.setName('amount').setRequired(true))
-].map(c => c.toJSON());
+function setPoints(userId, amount) {
+    points[userId] = amount;
+    savePoints();
+}
 
-// ===== REGISTER =====
-const rest = new REST({ version: '10' }).setToken(TOKEN);
-(async () => {
-  await rest.put(
-    Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
-    { body: commands }
-  );
-  console.log('✅ Slash commands ready');
-})();
+function getTop10() {
+    return Object.entries(points)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10);
+}
 
-// ===== MESSAGE COMMANDS =====
-client.on('messageCreate', async msg => {
-  if (!msg.guild || msg.author.bot) return;
-  if (!msg.content.startsWith('!')) return;
+// ----------------- LOGS CHANNEL -----------------
+const LOGS_CHANNEL_ID = process.env.LOGS_CHANNEL_ID; // set in .env
 
-  const cmd = msg.content.trim().split(/\s+/)[0].toLowerCase();
+function logAction(action, moderator, targetUser, amount) {
+    const channel = client.channels.cache.get(LOGS_CHANNEL_ID);
+    if (!channel) return;
+    const embed = new EmbedBuilder()
+        .setTitle('Points Log')
+        .setColor('Blue')
+        .setDescription(`${moderator} performed **${action}** on ${targetUser} with amount: ${amount}`)
+        .setTimestamp();
+    channel.send({ embeds: [embed] });
+}
 
-  // ❌ ignore everything except these
-  if (!['!rank', '!top10'].includes(cmd)) return;
+// ----------------- COMMANDS -----------------
+client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isChatInputCommand()) return;
 
-  const cd = checkCooldown(msg.author.id, cmd);
-  if (cd) return msg.reply(`⏳ Wait ${cd}s`);
+    const { commandName, options, user, member } = interaction;
 
-  // ===== TOP10 =====
-  if (cmd === '!top10') {
-    const users = await User.find({ total: { $gt: 0 } })
-      .sort({ total: -1 })
-      .limit(10);
+    // ----------------- COOLDOWN -----------------
+    const key = `${user.id}-${commandName}`;
+    const now = Date.now();
+    const cooldownAmount = 5 * 1000; // 5 seconds per command
+    if (cooldowns.has(key)) {
+        const expiration = cooldowns.get(key) + cooldownAmount;
+        if (now < expiration) {
+            return interaction.reply({ content: `⏱ Please wait before using this command again.`, ephemeral: true });
+        }
+    }
+    cooldowns.set(key, now);
+    setTimeout(() => cooldowns.delete(key), cooldownAmount);
 
-    let desc = users.length ? '' : 'No data yet';
-    users.forEach((u, i) => {
-      desc += `**#${i + 1}** <@${u.userId}> • ${u.total} pts\n`;
-    });
+    // ----------------- ADMIN CHECK -----------------
+    const adminCommands = ['leaderboard', 'addpoints', 'removepoints', 'setpoints', 'panel'];
+    const userCommands = ['rank', 'top10'];
 
-    return msg.channel.send({
-      embeds: [new EmbedBuilder().setColor(0x00AEEF).setTitle('🔥 Top 10').setDescription(desc)]
-    });
-  }
-
-  // ===== RANK =====
-  if (cmd === '!rank') {
-    const user = await getUser(msg.author.id);
-    return msg.reply(`⭐ You have ${user.total} points`);
-  }
-});
-
-// ===== INTERACTIONS =====
-client.on(Events.InteractionCreate, async interaction => {
-  if (!interaction.isChatInputCommand() && !interaction.isButton()) return;
-
-  // ===== BUTTONS =====
-  if (interaction.isButton()) {
-    const user = await getUser(interaction.user.id);
-    const member = interaction.guild.members.cache.get(interaction.user.id);
-
-    const inAssist = member?.voice.channelId && ASSIST_CHANNELS.includes(member.voice.channelId);
-    if (!inAssist) return interaction.reply({ content: '❌ Join VC first', ephemeral: true });
-
-    if (interaction.customId === 'in') {
-      user.active = true;
-      user.lastClick = Date.now();
-      await user.save();
-      return interaction.reply({ content: '✅ ACTIVE', ephemeral: true });
+    if (adminCommands.includes(commandName)) {
+        if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+            return interaction.reply({ content: '❌ You need admin permissions to use this command.', ephemeral: true });
+        }
     }
 
-    if (interaction.customId === 'out') {
-      user.active = false;
-      user.lastClick = 0;
-      await user.save();
-      return interaction.reply({ content: '🔴 OFFLINE', ephemeral: true });
+    // ----------------- COMMAND LOGIC -----------------
+    if (commandName === 'addpoints') {
+        const target = options.getUser('user');
+        const amount = options.getInteger('amount');
+        addPoints(target.id, amount);
+        logAction('ADD POINTS', user.tag, target.tag, amount);
+        return interaction.reply(`✅ Added ${amount} points to ${target.tag}`);
     }
-  }
 
-  // ===== SLASH =====
-  const cmd = interaction.commandName;
+    if (commandName === 'removepoints') {
+        const target = options.getUser('user');
+        const amount = options.getInteger('amount');
+        removePoints(target.id, amount);
+        logAction('REMOVE POINTS', user.tag, target.tag, amount);
+        return interaction.reply(`✅ Removed ${amount} points from ${target.tag}`);
+    }
 
-  const cd = checkCooldown(interaction.user.id, cmd);
-  if (cd) return interaction.reply({ content: `⏳ Wait ${cd}s`, ephemeral: true });
+    if (commandName === 'setpoints') {
+        const target = options.getUser('user');
+        const amount = options.getInteger('amount');
+        setPoints(target.id, amount);
+        logAction('SET POINTS', user.tag, target.tag, amount);
+        return interaction.reply(`✅ Set ${target.tag} points to ${amount}`);
+    }
 
-  const isAdmin = interaction.member.permissions.has('Administrator');
+    if (commandName === 'leaderboard' || commandName === 'top10') {
+        const top = getTop10();
+        const embed = new EmbedBuilder()
+            .setTitle('🏆 Top 10 Leaderboard')
+            .setColor('Gold')
+            .setDescription(top.map(([id, pts], i) => `${i + 1}. <@${id}> - ${pts} points`).join('\n'));
+        return interaction.reply({ embeds: [embed] });
+    }
 
-  // ✅ ADMIN ONLY
-  if (
-    ['leaderboard','panel','addpoints','removepoints','setpoints'].includes(cmd) &&
-    !isAdmin
-  ) {
-    return interaction.reply({ content: '❌ Admin only command', ephemeral: true });
-  }
+    if (commandName === 'rank') {
+        const target = options.getUser('user') || user;
+        const pts = points[target.id] || 0;
+        return interaction.reply(`${target.tag} has ${pts} points.`);
+    }
 
-  // ===== PUBLIC =====
-  if (cmd === 'rank') {
-    const user = await getUser(interaction.user.id);
-    return interaction.reply(`⭐ Points: ${user.total}`);
-  }
-
-  if (cmd === 'top10') {
-    const users = await User.find().sort({ total: -1 }).limit(10);
-    const txt = users.map((u, i) => `#${i+1} <@${u.userId}> • ${u.total}`).join('\n');
-    return interaction.reply(txt || 'No data');
-  }
-
-  // ===== ADMIN =====
-  if (cmd === 'leaderboard') {
-    const users = await User.find().sort({ total: -1 });
-    const txt = users.map((u, i) => `#${i+1} <@${u.userId}> • ${u.total}`).join('\n');
-    return interaction.reply(txt);
-  }
-
-  if (cmd === 'panel') {
-    await sendPanel(interaction.channel);
-    return interaction.reply({ content: '✅ Panel sent', ephemeral: true });
-  }
-
-  if (['addpoints','removepoints','setpoints'].includes(cmd)) {
-    const target = interaction.options.getUser('user');
-    const amount = interaction.options.getInteger('amount');
-
-    let update;
-    if (cmd === 'addpoints') update = { $inc: { total: amount } };
-    if (cmd === 'removepoints') update = { $inc: { total: -amount } };
-    if (cmd === 'setpoints') update = { $set: { total: amount } };
-
-    await User.updateOne({ userId: target.id }, update, { upsert: true });
-
-    await logAction(interaction.guild, `📊 ${cmd} → ${target.tag} (${amount})`);
-
-    return interaction.reply(`✅ Done for ${target.tag}`);
-  }
+    if (commandName === 'panel') {
+        return interaction.reply({ content: '🎛 Panel functionality coming soon', ephemeral: true });
+    }
 });
 
-// ===== READY =====
-client.once('ready', () => console.log(`${client.user.tag} is online`));
+// ----------------- DEPLOY SLASH COMMANDS -----------------
+client.on('ready', async () => {
+    console.log(`Logged in as ${client.user.tag}`);
 
-// ===== LOGIN =====
-client.login(TOKEN);
+    const guildId = process.env.GUILD_ID;
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) return console.error('Guild not found.');
+
+    await guild.commands.set([
+        {
+            name: 'addpoints',
+            description: 'Add points to a user',
+            options: [
+                { type: 6, name: 'user', description: 'User to add points', required: true },
+                { type: 4, name: 'amount', description: 'Points to add', required: true }
+            ]
+        },
+        {
+            name: 'removepoints',
+            description: 'Remove points from a user',
+            options: [
+                { type: 6, name: 'user', description: 'User to remove points', required: true },
+                { type: 4, name: 'amount', description: 'Points to remove', required: true }
+            ]
+        },
+        {
+            name: 'setpoints',
+            description: 'Set points for a user',
+            options: [
+                { type: 6, name: 'user', description: 'User to set points', required: true },
+                { type: 4, name: 'amount', description: 'Points to set', required: true }
+            ]
+        },
+        {
+            name: 'leaderboard',
+            description: 'Show the leaderboard'
+        },
+        {
+            name: 'top10',
+            description: 'Show top 10 users'
+        },
+        {
+            name: 'rank',
+            description: 'Show your rank or another user',
+            options: [
+                { type: 6, name: 'user', description: 'User to check rank (optional)', required: false }
+            ]
+        },
+        {
+            name: 'panel',
+            description: 'Admin panel commands'
+        }
+    ]);
+});
+
+// ----------------- LOGIN -----------------
+client.login(process.env.TOKEN);
