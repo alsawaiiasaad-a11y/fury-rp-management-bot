@@ -9,7 +9,10 @@ const {
   ButtonStyle,
   Events,
   EmbedBuilder,
-  AttachmentBuilder
+  AttachmentBuilder,
+  REST,
+  Routes,
+  SlashCommandBuilder
 } = require('discord.js');
 
 const fs = require('fs');
@@ -22,7 +25,7 @@ mongoose.connect(process.env.MONGO_URI)
 
 // ===== Schema =====
 const userSchema = new mongoose.Schema({
-  userId: { type: String, unique: true },
+  userId: String,
   total: { type: Number, default: 0 },
   active: { type: Boolean, default: false },
   lastClick: { type: Number, default: 0 }
@@ -41,18 +44,25 @@ const client = new Client({
 });
 
 const TOKEN = process.env.TOKEN;
+const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
 const ASSIST_CHANNELS = (process.env.ASSIST_CHANNELS || '').split(',').filter(Boolean);
 
-// ===== Admin Check =====
-function isAdmin(member) {
-  return member.permissions.has('Administrator');
-}
+// ===== Cooldown =====
+const cooldowns = new Map();
+const COOLDOWN = 5000;
 
-// ===== Buttons =====
-const row = new ActionRowBuilder().addComponents(
-  new ButtonBuilder().setCustomId('in').setLabel('🟢 In').setStyle(ButtonStyle.Success),
-  new ButtonBuilder().setCustomId('out').setLabel('🔴 Out').setStyle(ButtonStyle.Danger)
-);
+function checkCooldown(userId, cmd) {
+  const key = `${userId}-${cmd}`;
+  const now = Date.now();
+
+  if (cooldowns.has(key)) {
+    const expire = cooldowns.get(key);
+    if (now < expire) return Math.ceil((expire - now) / 1000);
+  }
+
+  cooldowns.set(key, now + COOLDOWN);
+  return null;
+}
 
 // ===== Helper =====
 async function getUser(userId) {
@@ -64,13 +74,18 @@ async function getUser(userId) {
   return user;
 }
 
+// ===== Logs =====
+async function logAction(guild, text) {
+  try {
+    const ch = guild.channels.cache.get(LOG_CHANNEL_ID);
+    if (ch) ch.send(text);
+  } catch {}
+}
+
 // ===== PANEL =====
 async function sendPanel(channel) {
   const filePath = path.join(__dirname, 'assets', 'design.gif');
-
-  if (!fs.existsSync(filePath)) {
-    return channel.send("❌ Panel GIF missing");
-  }
+  if (!fs.existsSync(filePath)) return channel.send('❌ GIF missing');
 
   const attachment = new AttachmentBuilder(filePath);
 
@@ -79,39 +94,66 @@ async function sendPanel(channel) {
     .setTitle('💻 Fury Management System')
     .setDescription(
       "Click **In** to start working\n" +
-      "⏱️ Click every 30 minutes to stay active\n" +
-      "🚫 Deafened = auto stop"
+      "⏱️ Click every 30 minutes\n" +
+      "🚫 Deafened = stop"
     )
-    .setImage('attachment://design.gif')
-    .setFooter({ text: 'Fury RP System' });
+    .setImage('attachment://design.gif');
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('in').setLabel('🟢 In').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('out').setLabel('🔴 Out').setStyle(ButtonStyle.Danger)
+  );
 
   await channel.send({ embeds: [embed], files: [attachment], components: [row] });
 }
 
-// ===== COMMANDS =====
+// ===== SLASH COMMANDS =====
+const commands = [
+  new SlashCommandBuilder().setName('rank').setDescription('Your rank'),
+  new SlashCommandBuilder().setName('top10').setDescription('Top 10'),
+  new SlashCommandBuilder().setName('leaderboard').setDescription('Leaderboard'),
+  new SlashCommandBuilder().setName('panel').setDescription('Send panel'),
+  new SlashCommandBuilder()
+    .setName('addpoints')
+    .setDescription('Add points')
+    .addUserOption(o => o.setName('user').setRequired(true))
+    .addIntegerOption(o => o.setName('amount').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('removepoints')
+    .setDescription('Remove points')
+    .addUserOption(o => o.setName('user').setRequired(true))
+    .addIntegerOption(o => o.setName('amount').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('setpoints')
+    .setDescription('Set points')
+    .addUserOption(o => o.setName('user').setRequired(true))
+    .addIntegerOption(o => o.setName('amount').setRequired(true))
+].map(c => c.toJSON());
+
+// ===== REGISTER =====
+const rest = new REST({ version: '10' }).setToken(TOKEN);
+(async () => {
+  await rest.put(
+    Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
+    { body: commands }
+  );
+  console.log('✅ Slash commands ready');
+})();
+
+// ===== MESSAGE COMMANDS =====
 client.on('messageCreate', async msg => {
   if (!msg.guild || msg.author.bot) return;
   if (!msg.content.startsWith('!')) return;
 
-  const args = msg.content.trim().split(/\s+/);
-  const cmd = args[0].toLowerCase();
-  const isUserAdmin = isAdmin(msg.member);
+  const cmd = msg.content.trim().split(/\s+/)[0].toLowerCase();
 
-  // ✅ ONLY THESE NEED ADMIN
-  const adminOnly = [
-    '!leaderboard',
-    '!panel',
-    '!resetpoints',
-    '!addpoints',
-    '!removepoints',
-    '!setpoints'
-  ];
+  // ❌ ignore everything except these
+  if (!['!rank', '!top10'].includes(cmd)) return;
 
-  if (adminOnly.includes(cmd) && !isUserAdmin) {
-    return msg.reply('❌ Admin only command');
-  }
+  const cd = checkCooldown(msg.author.id, cmd);
+  if (cd) return msg.reply(`⏳ Wait ${cd}s`);
 
-  // ===== TOP 10 =====
+  // ===== TOP10 =====
   if (cmd === '!top10') {
     const users = await User.find({ total: { $gt: 0 } })
       .sort({ total: -1 })
@@ -123,175 +165,98 @@ client.on('messageCreate', async msg => {
     });
 
     return msg.channel.send({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(0x00AEEF)
-          .setTitle('🔥 Top 10')
-          .setDescription(desc)
-      ]
+      embeds: [new EmbedBuilder().setColor(0x00AEEF).setTitle('🔥 Top 10').setDescription(desc)]
     });
   }
 
   // ===== RANK =====
   if (cmd === '!rank') {
     const user = await getUser(msg.author.id);
-    const users = await User.find({ total: { $gt: 0 } }).sort({ total: -1 });
-    const rank = users.findIndex(u => u.userId === msg.author.id) + 1;
-
-    return msg.reply({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(0x00FFAA)
-          .setTitle('📊 Your Stats')
-          .setThumbnail(msg.author.displayAvatarURL())
-          .addFields(
-            { name: '🏆 Rank', value: rank ? `#${rank}` : 'Unranked', inline: true },
-            { name: '⭐ Points', value: `${user.total}`, inline: true },
-            { name: '📡 Status', value: user.active ? '🟢 Active' : '⚫ Inactive', inline: true }
-          )
-      ]
-    });
-  }
-
-  // ===== LEADERBOARD =====
-  if (cmd === '!leaderboard') {
-    const users = await User.find({ total: { $gt: 0 } }).sort({ total: -1 });
-    if (!users.length) return msg.channel.send('No one has points yet 👀');
-
-    let desc = '';
-    users.forEach((u, i) => {
-      desc += `**#${i + 1}** <@${u.userId}> • ${u.total} pts\n`;
-    });
-
-    return msg.channel.send({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(0xFFD700)
-          .setTitle(`🏆 Leaderboard`)
-          .setDescription(desc)
-      ]
-    });
-  }
-
-  // ===== PANEL =====
-  if (cmd === '!panel') return sendPanel(msg.channel);
-
-  // ===== RESET =====
-  if (cmd === '!resetpoints') {
-    await User.updateMany({}, { total: 0 });
-    return msg.reply("✅ All points reset");
-  }
-
-  // ===== POINT COMMANDS =====
-  if (['!addpoints', '!removepoints', '!setpoints'].includes(cmd)) {
-    const mention = msg.mentions.users.first();
-    const points = parseInt(args[2]);
-
-    if (!mention || isNaN(points)) {
-      return msg.reply(`Usage: ${cmd} @user 50`);
-    }
-
-    if (cmd === '!addpoints') {
-      await User.updateOne({ userId: mention.id }, { $inc: { total: points } }, { upsert: true });
-    }
-
-    if (cmd === '!removepoints') {
-      await User.updateOne({ userId: mention.id }, { $inc: { total: -points } });
-    }
-
-    if (cmd === '!setpoints') {
-      await User.updateOne({ userId: mention.id }, { $set: { total: points } }, { upsert: true });
-    }
-
-    return msg.reply(`✅ Updated points for <@${mention.id}>`);
+    return msg.reply(`⭐ You have ${user.total} points`);
   }
 });
 
-// ===== BUTTONS =====
+// ===== INTERACTIONS =====
 client.on(Events.InteractionCreate, async interaction => {
-  if (!interaction.isButton()) return;
+  if (!interaction.isChatInputCommand() && !interaction.isButton()) return;
 
-  const user = await getUser(interaction.user.id);
-  const member = interaction.guild.members.cache.get(interaction.user.id);
+  // ===== BUTTONS =====
+  if (interaction.isButton()) {
+    const user = await getUser(interaction.user.id);
+    const member = interaction.guild.members.cache.get(interaction.user.id);
 
-  const inAssist = member?.voice.channelId && ASSIST_CHANNELS.includes(member.voice.channelId);
-  const isDeafened = member?.voice.selfDeaf;
-  const isMuted = member?.voice.selfMute;
+    const inAssist = member?.voice.channelId && ASSIST_CHANNELS.includes(member.voice.channelId);
+    if (!inAssist) return interaction.reply({ content: '❌ Join VC first', ephemeral: true });
 
-  if (!inAssist) return interaction.reply({ content: '❌ Join assist VC first', ephemeral: true });
-  if (isDeafened || isMuted) return interaction.reply({ content: '🚫 Cannot sign IN while deafened', ephemeral: true });
-
-  if (interaction.customId === 'in') {
-    if (user.active) return interaction.reply({ content: '⚠️ You are already IN', ephemeral: true });
-    user.active = true;
-    user.lastClick = Date.now();
-    await user.save();
-    return interaction.reply({ content: '✅ You are now ACTIVE', ephemeral: true });
-  }
-
-  if (interaction.customId === 'out') {
-    if (!user.active) return interaction.reply({ content: '⚠️ You are not IN', ephemeral: true });
-    user.active = false;
-    user.lastClick = 0;
-    await user.save();
-    return interaction.reply({ content: '🔴 You are now OFFLINE', ephemeral: true });
-  }
-});
-
-// ===== TIMER =====
-setInterval(async () => {
-  const now = Date.now();
-  const users = await User.find({ active: true });
-
-  for (const user of users) {
-    let member = null;
-    for (const g of client.guilds.cache.values()) {
-      const m = g.members.cache.get(user.userId);
-      if (m) { member = m; break; }
+    if (interaction.customId === 'in') {
+      user.active = true;
+      user.lastClick = Date.now();
+      await user.save();
+      return interaction.reply({ content: '✅ ACTIVE', ephemeral: true });
     }
-    if (!member || !member.voice.channelId) continue;
 
-    const inAssist = ASSIST_CHANNELS.includes(member.voice.channelId);
-
-    if (!inAssist || member.voice.selfDeaf || now - user.lastClick > 30 * 60 * 1000) {
+    if (interaction.customId === 'out') {
       user.active = false;
       user.lastClick = 0;
       await user.save();
-      try { await member.send('🚨 You were signed OUT. Click IN again.'); } catch {}
-      continue;
+      return interaction.reply({ content: '🔴 OFFLINE', ephemeral: true });
     }
-
-    user.total += 1;
-    await user.save();
   }
 
-  console.log('⏱️ Timer updated');
-}, 5 * 60 * 1000);
+  // ===== SLASH =====
+  const cmd = interaction.commandName;
 
-// ===== VOICE =====
-client.on('voiceStateUpdate', async (oldState, newState) => {
-  const member = newState.member || oldState.member;
-  const user = await getUser(member.id);
+  const cd = checkCooldown(interaction.user.id, cmd);
+  if (cd) return interaction.reply({ content: `⏳ Wait ${cd}s`, ephemeral: true });
 
-  if (user.active && newState.selfDeaf && !oldState.selfDeaf) {
-    user.active = false;
-    user.lastClick = 0;
-    await user.save();
-    try { await member.send('🚫 You deafened. Timer stopped.'); } catch {}
+  const isAdmin = interaction.member.permissions.has('Administrator');
+
+  // ✅ ADMIN ONLY
+  if (
+    ['leaderboard','panel','addpoints','removepoints','setpoints'].includes(cmd) &&
+    !isAdmin
+  ) {
+    return interaction.reply({ content: '❌ Admin only command', ephemeral: true });
   }
 
-  if (user.active && oldState.channelId && !newState.channelId) {
-    user.active = false;
-    user.lastClick = 0;
-    await user.save();
-    try { await member.send('🚨 You left the assist VC. Timer stopped.'); } catch {}
+  // ===== PUBLIC =====
+  if (cmd === 'rank') {
+    const user = await getUser(interaction.user.id);
+    return interaction.reply(`⭐ Points: ${user.total}`);
   }
 
-  if (user.active && oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
-    user.active = false;
-    user.lastClick = 0;
-    await user.save();
-    try { await member.send('⚠️ You switched voice channels. Timer stopped.'); } catch {}
+  if (cmd === 'top10') {
+    const users = await User.find().sort({ total: -1 }).limit(10);
+    const txt = users.map((u, i) => `#${i+1} <@${u.userId}> • ${u.total}`).join('\n');
+    return interaction.reply(txt || 'No data');
+  }
+
+  // ===== ADMIN =====
+  if (cmd === 'leaderboard') {
+    const users = await User.find().sort({ total: -1 });
+    const txt = users.map((u, i) => `#${i+1} <@${u.userId}> • ${u.total}`).join('\n');
+    return interaction.reply(txt);
+  }
+
+  if (cmd === 'panel') {
+    await sendPanel(interaction.channel);
+    return interaction.reply({ content: '✅ Panel sent', ephemeral: true });
+  }
+
+  if (['addpoints','removepoints','setpoints'].includes(cmd)) {
+    const target = interaction.options.getUser('user');
+    const amount = interaction.options.getInteger('amount');
+
+    let update;
+    if (cmd === 'addpoints') update = { $inc: { total: amount } };
+    if (cmd === 'removepoints') update = { $inc: { total: -amount } };
+    if (cmd === 'setpoints') update = { $set: { total: amount } };
+
+    await User.updateOne({ userId: target.id }, update, { upsert: true });
+
+    await logAction(interaction.guild, `📊 ${cmd} → ${target.tag} (${amount})`);
+
+    return interaction.reply(`✅ Done for ${target.tag}`);
   }
 });
 
