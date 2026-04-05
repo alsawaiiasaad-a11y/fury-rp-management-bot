@@ -1,6 +1,13 @@
 require('dotenv').config();
 
-const { Client, GatewayIntentBits, Collection, PermissionsBitField, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { 
+    Client, 
+    GatewayIntentBits, 
+    Partials, 
+    PermissionsBitField, 
+    EmbedBuilder, 
+    Collection 
+} = require('discord.js');
 const fs = require('fs');
 const path = require('path');
 
@@ -10,189 +17,161 @@ const client = new Client({
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.GuildMembers,
         GatewayIntentBits.MessageContent
-    ]
+    ],
+    partials: [Partials.Channel]
 });
 
-// ----------------- DATA STORAGE -----------------
-const pointsDataPath = path.join(__dirname, 'points.json');
-let points = {};
-if (fs.existsSync(pointsDataPath)) {
-    points = JSON.parse(fs.readFileSync(pointsDataPath, 'utf8'));
-}
+// ====== POINTS DATA ======
+const pointsFile = path.join(__dirname, 'points.json');
+let pointsData = {};
+if (fs.existsSync(pointsFile)) pointsData = JSON.parse(fs.readFileSync(pointsFile, 'utf-8'));
 
+// ====== COOLDOWNS ======
 const cooldowns = new Collection();
+const COOLDOWN = 5000; // 5 seconds per command
 
-// ----------------- HELPER FUNCTIONS -----------------
+// ====== COMMANDS ======
+client.commands = new Collection();
+
+// Helper: Save points
 function savePoints() {
-    fs.writeFileSync(pointsDataPath, JSON.stringify(points, null, 2));
+    fs.writeFileSync(pointsFile, JSON.stringify(pointsData, null, 2));
 }
 
-function addPoints(userId, amount) {
-    if (!points[userId]) points[userId] = 0;
-    points[userId] += amount;
-    savePoints();
+// ====== LOG FUNCTION ======
+function logAction(message) {
+    const logChannel = message.guild.channels.cache.find(ch => ch.name === 'points-log');
+    if (!logChannel) return;
+    logChannel.send({ content: message });
 }
 
-function removePoints(userId, amount) {
-    if (!points[userId]) points[userId] = 0;
-    points[userId] -= amount;
-    if (points[userId] < 0) points[userId] = 0;
-    savePoints();
+// ====== ADMIN CHECK ======
+function isAdmin(member) {
+    return member.permissions.has(PermissionsBitField.Flags.Administrator);
 }
 
-function setPoints(userId, amount) {
-    points[userId] = amount;
-    savePoints();
-}
+// ====== SLASH COMMAND REGISTRATION ======
+client.on('ready', async () => {
+    console.log(`Logged in as ${client.user.tag}`);
 
-function getTop10() {
-    return Object.entries(points)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 10);
-}
+    const guild = client.guilds.cache.get(process.env.GUILD_ID); 
+    if (!guild) return console.error('Guild not found');
 
-// ----------------- LOGS CHANNEL -----------------
-const LOGS_CHANNEL_ID = process.env.LOGS_CHANNEL_ID; // set in .env
+    await guild.commands.set([
+        {
+            name: 'rank',
+            description: 'Show your points'
+        },
+        {
+            name: 'leaderboard',
+            description: 'Show top 10 points (Admin Only)'
+        },
+        {
+            name: 'addpoints',
+            description: 'Add points to a user (Admin Only)',
+            options: [
+                { name: 'user', type: 6, description: 'Select a user', required: true },
+                { name: 'amount', type: 4, description: 'Points to add', required: true }
+            ]
+        },
+        {
+            name: 'removepoints',
+            description: 'Remove points from a user (Admin Only)',
+            options: [
+                { name: 'user', type: 6, description: 'Select a user', required: true },
+                { name: 'amount', type: 4, description: 'Points to remove', required: true }
+            ]
+        },
+        {
+            name: 'setpoints',
+            description: 'Set points of a user (Admin Only)',
+            options: [
+                { name: 'user', type: 6, description: 'Select a user', required: true },
+                { name: 'amount', type: 4, description: 'Points to set', required: true }
+            ]
+        }
+    ]);
+});
 
-function logAction(action, moderator, targetUser, amount) {
-    const channel = client.channels.cache.get(LOGS_CHANNEL_ID);
-    if (!channel) return;
-    const embed = new EmbedBuilder()
-        .setTitle('Points Log')
-        .setColor('Blue')
-        .setDescription(`${moderator} performed **${action}** on ${targetUser} with amount: ${amount}`)
-        .setTimestamp();
-    channel.send({ embeds: [embed] });
-}
-
-// ----------------- COMMANDS -----------------
+// ====== INTERACTIONS ======
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
 
     const { commandName, options, user, member } = interaction;
 
-    // ----------------- COOLDOWN -----------------
-    const key = `${user.id}-${commandName}`;
+    // ====== COOLDOWN CHECK ======
     const now = Date.now();
-    const cooldownAmount = 5 * 1000; // 5 seconds per command
-    if (cooldowns.has(key)) {
-        const expiration = cooldowns.get(key) + cooldownAmount;
+    if (!cooldowns.has(user.id)) cooldowns.set(user.id, new Collection());
+    const timestamps = cooldowns.get(user.id);
+
+    if (timestamps.has(commandName)) {
+        const expiration = timestamps.get(commandName) + COOLDOWN;
         if (now < expiration) {
-            return interaction.reply({ content: `⏱ Please wait before using this command again.`, ephemeral: true });
+            return interaction.reply({ content: `⏱ Please wait ${Math.ceil((expiration - now)/1000)}s before using this command again.`, ephemeral: true });
         }
     }
-    cooldowns.set(key, now);
-    setTimeout(() => cooldowns.delete(key), cooldownAmount);
+    timestamps.set(commandName, now);
 
-    // ----------------- ADMIN CHECK -----------------
-    const adminCommands = ['leaderboard', 'addpoints', 'removepoints', 'setpoints', 'panel'];
-    const userCommands = ['rank', 'top10'];
-
-    if (adminCommands.includes(commandName)) {
-        if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-            return interaction.reply({ content: '❌ You need admin permissions to use this command.', ephemeral: true });
+    try {
+        if (commandName === 'rank') {
+            const pts = pointsData[user.id] || 0;
+            return interaction.reply({ content: `🏆 You have **${pts} points**!`, ephemeral: true });
         }
-    }
 
-    // ----------------- COMMAND LOGIC -----------------
-    if (commandName === 'addpoints') {
-        const target = options.getUser('user');
-        const amount = options.getInteger('amount');
-        addPoints(target.id, amount);
-        logAction('ADD POINTS', user.tag, target.tag, amount);
-        return interaction.reply(`✅ Added ${amount} points to ${target.tag}`);
-    }
+        // ====== ADMIN COMMANDS ======
+        if (!isAdmin(member)) {
+            return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+        }
 
-    if (commandName === 'removepoints') {
-        const target = options.getUser('user');
-        const amount = options.getInteger('amount');
-        removePoints(target.id, amount);
-        logAction('REMOVE POINTS', user.tag, target.tag, amount);
-        return interaction.reply(`✅ Removed ${amount} points from ${target.tag}`);
-    }
+        if (commandName === 'leaderboard') {
+            const sorted = Object.entries(pointsData)
+                .sort(([,a],[,b]) => b-a)
+                .slice(0, 10);
+            let desc = '';
+            for (let i = 0; i < sorted.length; i++) {
+                const userId = sorted[i][0];
+                const pts = sorted[i][1];
+                const member = await interaction.guild.members.fetch(userId).catch(()=>null);
+                const name = member ? member.user.tag : 'Unknown User';
+                desc += `**${i+1}. ${name}** - ${pts} pts\n`;
+            }
+            return interaction.reply({ embeds: [new EmbedBuilder().setTitle('🏆 Top 10 Leaderboard').setDescription(desc)] });
+        }
 
-    if (commandName === 'setpoints') {
-        const target = options.getUser('user');
-        const amount = options.getInteger('amount');
-        setPoints(target.id, amount);
-        logAction('SET POINTS', user.tag, target.tag, amount);
-        return interaction.reply(`✅ Set ${target.tag} points to ${amount}`);
-    }
+        if (commandName === 'addpoints') {
+            const target = options.getUser('user');
+            const amount = options.getInteger('amount');
+            pointsData[target.id] = (pointsData[target.id] || 0) + amount;
+            savePoints();
+            logAction(`${user.tag} added ${amount} points to ${target.tag}`);
+            return interaction.reply({ content: `✅ Added ${amount} points to ${target.tag}` });
+        }
 
-    if (commandName === 'leaderboard' || commandName === 'top10') {
-        const top = getTop10();
-        const embed = new EmbedBuilder()
-            .setTitle('🏆 Top 10 Leaderboard')
-            .setColor('Gold')
-            .setDescription(top.map(([id, pts], i) => `${i + 1}. <@${id}> - ${pts} points`).join('\n'));
-        return interaction.reply({ embeds: [embed] });
-    }
+        if (commandName === 'removepoints') {
+            const target = options.getUser('user');
+            const amount = options.getInteger('amount');
+            pointsData[target.id] = Math.max((pointsData[target.id] || 0) - amount, 0);
+            savePoints();
+            logAction(`${user.tag} removed ${amount} points from ${target.tag}`);
+            return interaction.reply({ content: `✅ Removed ${amount} points from ${target.tag}` });
+        }
 
-    if (commandName === 'rank') {
-        const target = options.getUser('user') || user;
-        const pts = points[target.id] || 0;
-        return interaction.reply(`${target.tag} has ${pts} points.`);
-    }
+        if (commandName === 'setpoints') {
+            const target = options.getUser('user');
+            const amount = options.getInteger('amount');
+            pointsData[target.id] = amount;
+            savePoints();
+            logAction(`${user.tag} set ${target.tag} points to ${amount}`);
+            return interaction.reply({ content: `✅ Set ${target.tag} points to ${amount}` });
+        }
 
-    if (commandName === 'panel') {
-        return interaction.reply({ content: '🎛 Panel functionality coming soon', ephemeral: true });
+    } catch(err) {
+        console.error(err);
+        if (!interaction.replied) {
+            await interaction.reply({ content: '❌ Something went wrong.', ephemeral: true });
+        }
     }
 });
 
-// ----------------- DEPLOY SLASH COMMANDS -----------------
-client.on('ready', async () => {
-    console.log(`Logged in as ${client.user.tag}`);
-
-    const guildId = process.env.GUILD_ID;
-    const guild = client.guilds.cache.get(guildId);
-    if (!guild) return console.error('Guild not found.');
-
-    await guild.commands.set([
-        {
-            name: 'addpoints',
-            description: 'Add points to a user',
-            options: [
-                { type: 6, name: 'user', description: 'User to add points', required: true },
-                { type: 4, name: 'amount', description: 'Points to add', required: true }
-            ]
-        },
-        {
-            name: 'removepoints',
-            description: 'Remove points from a user',
-            options: [
-                { type: 6, name: 'user', description: 'User to remove points', required: true },
-                { type: 4, name: 'amount', description: 'Points to remove', required: true }
-            ]
-        },
-        {
-            name: 'setpoints',
-            description: 'Set points for a user',
-            options: [
-                { type: 6, name: 'user', description: 'User to set points', required: true },
-                { type: 4, name: 'amount', description: 'Points to set', required: true }
-            ]
-        },
-        {
-            name: 'leaderboard',
-            description: 'Show the leaderboard'
-        },
-        {
-            name: 'top10',
-            description: 'Show top 10 users'
-        },
-        {
-            name: 'rank',
-            description: 'Show your rank or another user',
-            options: [
-                { type: 6, name: 'user', description: 'User to check rank (optional)', required: false }
-            ]
-        },
-        {
-            name: 'panel',
-            description: 'Admin panel commands'
-        }
-    ]);
-});
-
-// ----------------- LOGIN -----------------
+// ====== LOGIN ======
 client.login(process.env.TOKEN);
